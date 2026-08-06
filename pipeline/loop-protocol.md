@@ -91,10 +91,19 @@ Before Step 1, shell out to:
 opc-harness runbook match "<task phrase>" [--dir <runbook-dir>]
 ```
 
-- Exit `0` + `matched: true` → **skip Step 1**. Adopt the returned
-  runbook's `units`, `flow`, `tier`, `protocolRefs` as the plan. Write
-  them into `$SESSION_DIR/plan.md` with a header noting which runbook fired
-  and the score.
+- Exit `0` + `matched: true` → preserve the match result's `runbook.id`
+  as `<matched-runbook-id>` and its top-level `dir` as
+  `<matched-runbook-dir>`, then shell out to:
+  ```bash
+  opc-harness runbook show "<matched-runbook-id>" --dir "<matched-runbook-dir>"
+  ```
+  Read and apply the complete returned `body` before writing
+  `$SESSION_DIR/plan.md`, reaching named human gates such as RTG-01,
+  reaching named positions such as P.01, or invoking `init-loop`. Only
+  after this complete body guidance has been applied may you adopt the
+  matched runbook's `units`, `flow`, `tier`, and `protocolRefs` as the
+  plan, skip Step 1, and write the runbook name and match score in the
+  plan header.
 - Exit `3` (match-miss) → proceed to Step 1.
 - To force a miss without scanning disk, prepend `OPC_DISABLE_RUNBOOKS=1`
   to the command. The CLI returns exit 3 with `disabled: true` in the
