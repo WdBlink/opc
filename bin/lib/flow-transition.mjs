@@ -3427,6 +3427,11 @@ async function _cmdTransitionLocked(from, to, verdict, flow, dir, template, stat
 
 export function cmdValidateChain(args) {
   const dir = resolveDir(args);
+  const phase = getFlag(args, "phase", "recovery");
+  if (phase !== "recovery" && phase !== "complete") {
+    console.log(JSON.stringify({ valid: false, phase, errors: ["--phase must be recovery or complete"], executedPath: [] }));
+    return;
+  }
 
   const statePath = join(dir, "flow-state.json");
   if (!existsSync(statePath)) {
@@ -3453,6 +3458,8 @@ export function cmdValidateChain(args) {
 
   const errors = [];
   errors.push(...sessionAuthorityErrors(state));
+  const currentRun = resolveCurrentRun(state);
+  const projectionByNode = new Map();
   const executedPath = [];
 
   // Load requiredExtensions from layered config (user → repo → cli).
@@ -3489,12 +3496,18 @@ export function cmdValidateChain(args) {
     executedPath.push(nd);
 
     const exact = resolveExactRunHandshake(dir, nd, entry.runId);
+    const currentIncomplete = phase === "recovery" &&
+      nd === state.currentNode && entry.runId === currentRun?.runId;
+    // A pending reentry keeps the preceding run as the canonical summary source.
+    if (!currentIncomplete || !exact.missing || !projectionByNode.has(nd)) {
+      projectionByNode.set(nd, entry.runId);
+    }
     if (exact.error) {
       errors.push(`${nd}/${entry.runId || "unknown"}: ${exact.error}`);
       continue;
     }
     if (exact.missing || !existsSync(exact.path)) {
-      if (nd === state.currentNode) continue;
+      if (currentIncomplete) continue;
       errors.push(`missing handshake for node '${nd}' run '${entry.runId}'`);
       continue;
     }
@@ -3510,10 +3523,13 @@ export function cmdValidateChain(args) {
       errors.push(...collectExtensionProvenanceReasons(dir, chainTemplate, requiredExtensions, nd, exact.data));
     }
   }
-  errors.push(...canonicalProjectionErrors(dir, state, canonicalProjectionValidator(dir, chainTemplate, state.tier)));
+  errors.push(...canonicalProjectionErrors(dir, state, canonicalProjectionValidator(dir, chainTemplate, state.tier), {
+    entries: [...projectionByNode].map(([nodeId, runId]) => ({ nodeId, runId })),
+  }));
 
   console.log(JSON.stringify({
     valid: errors.length === 0,
+    phase,
     errors,
     executedPath,
     bypassActive,
