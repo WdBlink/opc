@@ -1,16 +1,17 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  readlinkSync, realpathSync, rmSync, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HARNESS = fileURLToPath(new URL("../opc-harness.mjs", import.meta.url));
+const HARNESS = process.env.OPC_RECOVERY_TEST_HARNESS ||
+  fileURLToPath(new URL("../opc-harness.mjs", import.meta.url));
 const DEFAULT_PHASE = "recovery";
 const roots = [];
 const evidence = [];
@@ -23,10 +24,14 @@ after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-function cli(fx, command, args = []) {
+function cli(fx, command, args = [], timeout = 10_000) {
   const argv = [HARNESS, command, ...args, "--dir", fx.session];
-  const result = spawnSync(process.execPath, argv, { cwd: fx.root, encoding: "utf8", timeout: 10_000 });
-  evidence.push({ fixture: fx.name, argv, status: result.status, stdout: result.stdout, stderr: result.stderr });
+  const result = spawnSync(process.execPath, argv, { cwd: fx.root, encoding: "utf8", timeout });
+  evidence.push({ fixture: fx.name, argv, timeout, status: result.status, signal: result.signal,
+    error: result.error?.code, stdout: result.stdout, stderr: result.stderr });
+  if (fx.canary) {
+    assert.equal((result.stdout + result.stderr).includes(fx.canary), false, "CLI must not echo canonical payload");
+  }
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout.trim().split("\n").at(-1));
@@ -40,19 +45,23 @@ function snapshot(root) {
     else if (stat.isDirectory()) {
       entries.push([name, "directory"]);
       for (const child of readdirSync(path).sort()) visit(join(path, child), name + "/" + child);
-    } else entries.push([name, "file", digest(readFileSync(path))]);
+    } else if (stat.isFile()) entries.push([name, "file", digest(readFileSync(path))]);
+    else if (stat.isFIFO()) entries.push([name, "fifo"]);
+    else throw new Error("unsupported fixture file type: " + name);
   }
   visit(root, ".");
   return entries;
 }
 
-function readOnly(fx, command, args = []) {
+function readOnly(fx, command, args = [], timeout = 10_000) {
   const before = snapshot(fx.root);
-  const result = cli(fx, command, args);
-  const after = snapshot(fx.root);
-  evidence.push({ fixture: fx.name, command, before: digest(JSON.stringify(before)), after: digest(JSON.stringify(after)) });
-  assert.deepEqual(after, before, command + " must not change fixture paths, types, or bytes");
-  return result;
+  try {
+    return cli(fx, command, args, timeout);
+  } finally {
+    const after = snapshot(fx.root);
+    evidence.push({ fixture: fx.name, command, before: digest(JSON.stringify(before)), after: digest(JSON.stringify(after)) });
+    assert.deepEqual(after, before, command + " must not change fixture paths, types, or bytes");
+  }
 }
 
 function validate(fx, phase) {
@@ -211,3 +220,34 @@ test("a missing old artifact remains invalid during recovery", () => {
   assert.equal(result.valid, false, JSON.stringify(result));
   assert.match(result.errors.join("\n"), /build.*run_1/);
 });
+
+for (const damage of ["fifo", "directory", "external-symlink", "dangling-symlink", "internal-symlink", "parent-escape"]) {
+  for (const phase of ["recovery", "complete"]) {
+    test("canonical " + damage + " is rejected before reading in " + phase, () => {
+      const fx = fixture("canonical-" + damage + "-" + phase);
+      reenter(fx, 1);
+      const canonical = join(fx.session, "nodes", "build", "handshake.json");
+      const original = JSON.parse(readFileSync(canonical, "utf8"));
+      fx.canary = "BOUNDARY_PAYLOAD_SENTINEL_" + fx.name;
+      const external = join(fx.root, "external-canonical.json");
+      writeFileSync(external, JSON.stringify({ ...original, summary: fx.canary }) + "\n");
+      if (damage === "parent-escape") {
+        const outsideNode = join(fx.root, "outside-build");
+        renameSync(join(fx.session, "nodes", "build"), outsideNode);
+        symlinkSync(outsideNode, join(fx.session, "nodes", "build"));
+        writeFileSync(join(outsideNode, "handshake.json"), readFileSync(external));
+      } else {
+        rmSync(canonical);
+        if (damage === "fifo") execFileSync("mkfifo", [canonical], { timeout: 10_000 });
+        else if (damage === "directory") mkdirSync(canonical);
+        else if (damage === "external-symlink") symlinkSync(external, canonical);
+        else if (damage === "dangling-symlink") symlinkSync(join(fx.root, "missing-canonical.json"), canonical);
+        else symlinkSync(join(fx.session, "nodes", "build", "run_1", "handshake.json"), canonical);
+      }
+      const result = readOnly(fx, "validate-chain", ["--phase", phase], 1500);
+      assert.equal(result.valid, false, JSON.stringify(result));
+      assert.match(result.errors.join("\n"),
+        /build: canonical handshake must be a regular non-symlink file inside session/);
+    });
+  }
+}
