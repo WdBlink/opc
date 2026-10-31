@@ -3425,6 +3425,28 @@ async function _cmdTransitionLocked(from, to, verdict, flow, dir, template, stat
 
 // ─── validate-chain ─────────────────────────────────────────────
 
+function canonicalReadBoundaryErrors(dir, entries) {
+  const errors = [];
+  const sessionRoot = realpathSync(dir);
+  for (const nodeId of new Set(entries.map(entry => entry?.node || entry?.nodeId))) {
+    const message = `${nodeId}: canonical handshake must be a regular non-symlink file inside session`;
+    try {
+      const path = join(dir, "nodes", nodeId, "handshake.json");
+      if (!isWithinDir(resolve(dir), path)) {
+        errors.push(message);
+        continue;
+      }
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || !isWithinDir(sessionRoot, realpathSync(path))) {
+        errors.push(message);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") errors.push(message);
+    }
+  }
+  return errors;
+}
+
 export function cmdValidateChain(args) {
   const dir = resolveDir(args);
   const phase = getFlag(args, "phase", "recovery");
@@ -3491,7 +3513,21 @@ export function cmdValidateChain(args) {
       bypassSource = `runtime(${decision.source})`;
     }
   }
-  for (const entry of strictHistoryEntries(state)) {
+  const historyEntries = strictHistoryEntries(state);
+  const boundaryErrors = canonicalReadBoundaryErrors(dir, historyEntries);
+  if (boundaryErrors.length > 0) {
+    console.log(JSON.stringify({
+      valid: false,
+      phase,
+      errors: [...errors, ...boundaryErrors],
+      executedPath: historyEntries.map(entry => entry.node || entry.nodeId),
+      bypassActive,
+      bypassSource,
+      waivedRequiredExtensions,
+    }));
+    return;
+  }
+  for (const entry of historyEntries) {
     const nd = entry.node || entry.nodeId;
     executedPath.push(nd);
 
