@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.12.2 - Pending reentry recovery (2026-10-31)
+
+- Recovery validates the preceding completed canonical run while the selected
+  reentry run has no handshake. Historical runs and summaries remain checked.
+- Added explicit recovery and complete phases to the public CLI, preserving
+  its recovery default. The installed variant retains its complete default.
+- Incomplete runs still cannot complete, leave, or finalize.
+
 ## v0.12.1 — Mission Gate on native-first OPC (2026-08-20)
 
 ### Added

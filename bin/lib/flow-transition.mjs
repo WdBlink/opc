@@ -3425,8 +3425,35 @@ async function _cmdTransitionLocked(from, to, verdict, flow, dir, template, stat
 
 // ─── validate-chain ─────────────────────────────────────────────
 
+function canonicalReadBoundaryErrors(dir, entries) {
+  const errors = [];
+  const sessionRoot = realpathSync(dir);
+  for (const nodeId of new Set(entries.map(entry => entry?.node || entry?.nodeId))) {
+    const message = `${nodeId}: canonical handshake must be a regular non-symlink file inside session`;
+    try {
+      const path = join(dir, "nodes", nodeId, "handshake.json");
+      if (!isWithinDir(resolve(dir), path)) {
+        errors.push(message);
+        continue;
+      }
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || !isWithinDir(sessionRoot, realpathSync(path))) {
+        errors.push(message);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") errors.push(message);
+    }
+  }
+  return errors;
+}
+
 export function cmdValidateChain(args) {
   const dir = resolveDir(args);
+  const phase = getFlag(args, "phase", "recovery");
+  if (phase !== "recovery" && phase !== "complete") {
+    console.log(JSON.stringify({ valid: false, phase, errors: ["--phase must be recovery or complete"], executedPath: [] }));
+    return;
+  }
 
   const statePath = join(dir, "flow-state.json");
   if (!existsSync(statePath)) {
@@ -3453,6 +3480,8 @@ export function cmdValidateChain(args) {
 
   const errors = [];
   errors.push(...sessionAuthorityErrors(state));
+  const currentRun = resolveCurrentRun(state);
+  const projectionByNode = new Map();
   const executedPath = [];
 
   // Load requiredExtensions from layered config (user → repo → cli).
@@ -3484,17 +3513,37 @@ export function cmdValidateChain(args) {
       bypassSource = `runtime(${decision.source})`;
     }
   }
-  for (const entry of strictHistoryEntries(state)) {
+  const historyEntries = strictHistoryEntries(state);
+  const boundaryErrors = canonicalReadBoundaryErrors(dir, historyEntries);
+  if (boundaryErrors.length > 0) {
+    console.log(JSON.stringify({
+      valid: false,
+      phase,
+      errors: [...errors, ...boundaryErrors],
+      executedPath: historyEntries.map(entry => entry.node || entry.nodeId),
+      bypassActive,
+      bypassSource,
+      waivedRequiredExtensions,
+    }));
+    return;
+  }
+  for (const entry of historyEntries) {
     const nd = entry.node || entry.nodeId;
     executedPath.push(nd);
 
     const exact = resolveExactRunHandshake(dir, nd, entry.runId);
+    const currentIncomplete = phase === "recovery" &&
+      nd === state.currentNode && entry.runId === currentRun?.runId;
+    // A pending reentry keeps the preceding run as the canonical summary source.
+    if (!currentIncomplete || !exact.missing || !projectionByNode.has(nd)) {
+      projectionByNode.set(nd, entry.runId);
+    }
     if (exact.error) {
       errors.push(`${nd}/${entry.runId || "unknown"}: ${exact.error}`);
       continue;
     }
     if (exact.missing || !existsSync(exact.path)) {
-      if (nd === state.currentNode) continue;
+      if (currentIncomplete) continue;
       errors.push(`missing handshake for node '${nd}' run '${entry.runId}'`);
       continue;
     }
@@ -3510,10 +3559,13 @@ export function cmdValidateChain(args) {
       errors.push(...collectExtensionProvenanceReasons(dir, chainTemplate, requiredExtensions, nd, exact.data));
     }
   }
-  errors.push(...canonicalProjectionErrors(dir, state, canonicalProjectionValidator(dir, chainTemplate, state.tier)));
+  errors.push(...canonicalProjectionErrors(dir, state, canonicalProjectionValidator(dir, chainTemplate, state.tier), {
+    entries: [...projectionByNode].map(([nodeId, runId]) => ({ nodeId, runId })),
+  }));
 
   console.log(JSON.stringify({
     valid: errors.length === 0,
+    phase,
     errors,
     executedPath,
     bypassActive,

@@ -2,7 +2,7 @@
 name: opc
 description: "OPC — native-first, token-aware digraph task pipeline with independent multi-role evaluation. Use for /opc tasks, explicit or inferred flows, autonomous loops, and optional --mission global-bet governance. Codex-native subagents use role-appropriate model routing by default; external CLI adapters are explicit third-party opt-ins."
 metadata:
-  version: "0.12.1"
+  version: "0.12.2"
 ---
 
 # OPC — One Person Company
